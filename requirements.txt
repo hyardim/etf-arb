@@ -1,0 +1,13 @@
+# Pinned exactly. Half-life estimates are the headline output of this project,
+# so the numerical stack is pinned to keep results reproducible across machines.
+# Python 3.13 (3.14 is installed on the dev machine but wheel coverage lags).
+
+pandas==3.0.5
+numpy==2.5.2
+statsmodels==0.15.0
+scipy==1.18.1
+matplotlib==3.11.1
+yfinance==1.7.0
+PyYAML==6.0.3
+pyarrow==25.0.1
+pytest==9.1.1
