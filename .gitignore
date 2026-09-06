@@ -1,0 +1,20 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Data that regenerates from code.
+# NOTE: data/raw/nav/*.csv is deliberately NOT ignored -- the manual issuer
+# download is the one step a reviewer cannot reproduce from this repo.
+data/raw/prices/
+data/processed/
+*.parquet
+
+# Notebooks
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
