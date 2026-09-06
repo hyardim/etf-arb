@@ -1,0 +1,6 @@
+[tool.pytest.ini_options]
+# pythonpath keeps `from src...` imports working without an editable install
+# or a sys.path hack in conftest.
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
