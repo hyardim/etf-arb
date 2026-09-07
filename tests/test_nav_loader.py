@@ -95,9 +95,10 @@ def test_trailing_disclaimer_rows_are_dropped(tmp_path):
 
 
 def test_html_body_is_rejected(tmp_path):
-    """iShares answers a NAV CSV request with HTTP 200, Content-Type
-    text/csv, and its product page in the body. Status, content type and file
-    extension all report success, so the bytes are the only honest signal."""
+    """A CSV-looking URL in the iShares page HTML answers with HTTP 200,
+    Content-Type text/csv, and the product page in the body. Status, content
+    type and file extension all report success, so the bytes are the only
+    honest signal."""
     path = tmp_path / "HYG.csv"
     path.write_text(
         '<!DOCTYPE html>\n<html xmlns="http://www.w3.org/1999/xhtml" lang="en-US">\n'

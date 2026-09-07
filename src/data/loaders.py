@@ -184,21 +184,30 @@ def load_prices(
 # "is this the right convention" but "are these bytes the data I think they
 # are".
 #
-# That distinction is not theoretical. Scripted download of iShares NAV was
+# That distinction is not theoretical. Scripted download of issuer NAV was
 # attempted and rejected during design, and the way it failed is the reason
-# every guard below exists. Requesting the exact NAV CSV URL scraped off the
-# fund's own product page -- with a browser user-agent, a session cookie and a
-# correct referer -- returns:
+# every guard below exists.
+#
+# The iShares product page contains no NAV download link in its served HTML --
+# the download control is rendered client-side. What the static HTML does
+# contain is a URL that looks exactly like one:
+#
+#     <input type="hidden" id="videoSearchUrl"
+#            value=".../1467271812596.ajax?fileType=csv&fileName=HYG_NAV..." />
+#
+# Fetching it, with a browser user-agent, session cookie and correct referer,
+# returns:
 #
 #     HTTP 200
 #     Content-Type: text/csv; charset=UTF-8
 #     <!DOCTYPE html> ... the fund product page ...
 #
-# Status code, content type and file extension all report success while the
-# body is a web page. SSGA answered 301 -> 404 HTML, Vanguard served a
-# client-rendered shell, Invesco returned 406. A loader that trusted any
-# ordinary signal would have written a parsed web page into the NAV column and
-# raised nothing.
+# So the real endpoint is not reachable without executing the page's
+# JavaScript, while a decoy that is reachable answers every request with a web
+# page whose status code, content type and file extension all report success.
+# SSGA answered 301 -> 404, Vanguard served a client-rendered shell, Invesco
+# returned 406. A loader trusting any ordinary signal would have written a
+# parsed web page into the NAV column and raised nothing.
 #
 # So: verify the bytes, never the metadata.
 
