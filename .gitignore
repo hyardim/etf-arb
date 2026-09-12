@@ -11,6 +11,9 @@ __pycache__/
 # download is the one step a reviewer cannot reproduce from this repo.
 data/raw/prices/
 data/processed/
+
+# Figures ARE committed so the README renders on GitHub.
+!docs/figures/
 *.parquet
 
 # Notebooks
