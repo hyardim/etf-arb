@@ -60,16 +60,16 @@ def test_near_unit_root_is_caught(b):
 
 
 @pytest.mark.parametrize("true_hl", [0.02, 0.05, 0.1])
-def test_sub_resolution_half_lives_are_censored(true_hl):
+def test_sub_resolution_half_lives_are_unresolved(true_hl):
     """Daily sampling aliases anything below ~0.1 days to b = 0. The estimator
     must refuse a point estimate rather than invent one from noise."""
     path = simulate_ou(half_life_to_kappa(true_hl), SAMPLE_N, seed=1)
     r = estimate_reversion(path, ticker="FAST")
 
-    assert r.resolution is Resolution.CENSORED_FAST
+    assert r.resolution is Resolution.UNRESOLVED
     assert np.isnan(r.half_life)
     assert np.isfinite(r.half_life_upper_bound)
-    assert "censored" in r.display
+    assert "unresolved" in r.display
 
 
 def test_white_noise_is_censored_not_measured():
@@ -77,7 +77,7 @@ def test_white_noise_is_censored_not_measured():
     plausible ~0.2 days here, which is the exact trap this guard closes."""
     rng = np.random.default_rng(0)
     r = estimate_reversion(rng.standard_normal(SAMPLE_N), ticker="NOISE")
-    assert r.resolution is Resolution.CENSORED_FAST
+    assert r.resolution is Resolution.UNRESOLVED
     assert np.isnan(r.half_life)
 
 
@@ -92,11 +92,14 @@ def test_censor_bound_is_an_upper_bound():
     assert r.half_life_upper_bound < 1.0  # still an informative bound
 
 
-def test_censored_display_never_shows_a_point_estimate():
+def test_unresolved_display_leads_with_the_bound():
+    """The bound is the claim; the fitted value is shown after it so a loose
+    bound cannot be mistaken for a measurement of speed."""
     r = estimate_reversion(
         simulate_ou(half_life_to_kappa(0.03), SAMPLE_N, seed=4), ticker="FAST"
     )
     assert r.display.startswith("<")
+    assert "unresolved" in r.display
 
 
 # --------------------------------------------------------------------------
@@ -139,7 +142,7 @@ def test_identified_display_is_a_number():
     assert not r.display.startswith("<")
 
 
-def test_boundary_between_censored_and_identified():
+def test_boundary_between_unresolved_and_identified():
     """Around 0.25 days the regimes meet. Either verdict is legitimate there,
     but the two must never be confused: a censored result carries a bound and
     no estimate, an identified one carries an estimate and no bound."""
@@ -147,7 +150,7 @@ def test_boundary_between_censored_and_identified():
         simulate_ou(half_life_to_kappa(0.25), SAMPLE_N, seed=1), ticker="EDGE"
     )
     assert r.resolution in (
-        Resolution.CENSORED_FAST,
+        Resolution.UNRESOLVED,
         Resolution.IDENTIFIED_SUBDAILY,
         Resolution.IDENTIFIED,
     )
@@ -228,12 +231,12 @@ def test_subdaily_still_counts_as_identified():
     assert np.isfinite(r.half_life)
 
 
-def test_too_fast_is_censored_rather_than_subdaily():
+def test_too_fast_is_unresolved_rather_than_subdaily():
     """The three tiers must stay distinct. Below roughly 0.1 days the series
     is indistinguishable from white noise, and then no point estimate is
     warranted at all."""
     r = estimate_reversion(simulate_ou(half_life_to_kappa(0.05), SAMPLE_N, seed=1), ticker="F")
-    assert r.resolution is Resolution.CENSORED_FAST
+    assert r.resolution is Resolution.UNRESOLVED
     assert np.isnan(r.half_life)
 
 

@@ -102,10 +102,10 @@ def test_trending_series_gives_ratio_above_one():
 
 
 @pytest.mark.parametrize("true_hl", [0.05, 0.2])
-def test_censored_regime_shows_strong_reversion_model_free(true_hl):
+def test_unresolved_regime_shows_strong_reversion_model_free(true_hl):
     """The corroboration that matters.
 
-    A fund the AR(1) censors as 'reverts faster than daily data resolves'
+    A fund the AR(1) leaves unresolved
     should also show a very low variance ratio. If instead VR sat near 1, the
     censoring would more likely mean the AR(1) simply failed to fit.
     """

@@ -290,8 +290,20 @@ class Resolution(StrEnum):
     and the fitted value depends on the tail of the distribution rather than
     on directly observed decay. Reported as a number, labelled as partial."""
 
-    CENSORED_FAST = "censored_fast"
-    """Reverts faster than daily sampling can resolve. Only an upper bound."""
+    UNRESOLVED = "unresolved"
+    """Persistence is not distinguishable from zero, so no point estimate is
+    warranted -- only an upper bound on the half-life.
+
+    Deliberately NOT called "fast". The label was originally unresolved,
+    which asserted something the data does not establish. ITOT is the
+    counter-example: its fitted b of 0.2281 is the HIGHEST among the equity
+    funds, implying the slowest reversion of the group at 0.47 d, yet its
+    standard error of 0.1373 is four times IVV's and p(b=0) = 0.097. It is not
+    fast; it is imprecisely measured, and its wide bound of < 0.99 d says so.
+
+    Read this label as: if any persistence exists, its half-life is below the
+    stated bound. A tight bound (SPY, < 0.34 d) does mean fast. A loose one
+    (ITOT, < 0.99 d) means unmeasurable."""
 
     UNIT_ROOT = "unit_root"
     """Did not mean-revert over the sample. No finite half-life."""
@@ -313,7 +325,7 @@ class ReversionResult:
     half_life: float
     """NaN unless resolution is IDENTIFIED."""
     half_life_upper_bound: float
-    """For CENSORED_FAST, the bound implied by the upper confidence limit on
+    """For UNRESOLVED, the bound implied by the upper confidence limit on
     b. NaN otherwise."""
     reason: str
     alpha: float
@@ -339,8 +351,10 @@ class ReversionResult:
             return f"{self.half_life:.2f} d"
         if self.resolution is Resolution.IDENTIFIED_SUBDAILY:
             return f"{self.half_life:.2f} d (sub-daily)"
-        if self.resolution is Resolution.CENSORED_FAST:
-            return f"< {self.half_life_upper_bound:.2f} d (censored)"
+        if self.resolution is Resolution.UNRESOLVED:
+            point = half_life_from_b(self.fit.b)
+            shown = f"{point:.2f}" if np.isfinite(point) else "n/a"
+            return f"< {self.half_life_upper_bound:.2f} d (unresolved, fit {shown})"
         return f"n/a ({self.resolution.value})"
 
     def summary(self) -> str:
@@ -422,12 +436,14 @@ def estimate_reversion(
         # plausibly be, which is the strongest honest statement available.
         b_upper = fit.b + 1.96 * fit.b_se
         upper_bound = half_life_from_b(b_upper)
-        resolution = Resolution.CENSORED_FAST
+        resolution = Resolution.UNRESOLVED
         reason = (
-            f"p(b=0)={fit.b_pvalue:.3f} > {alpha}: persistence is indistinguishable "
-            f"from zero, so reversion completes inside one sampling interval and its "
-            f"speed is not resolvable at daily frequency. Reported as an upper bound "
-            f"from the upper confidence limit on b."
+            f"p(b=0)={fit.b_pvalue:.3f} > {alpha}: persistence is not distinguishable "
+            f"from zero, so no point estimate is warranted. The upper confidence limit "
+            f"on b bounds the half-life at {upper_bound:.2f}. A tight bound means "
+            f"reversion really is fast; a loose one means it is unmeasurable here, and "
+            f"the fitted half-life of {half_life_from_b(fit.b):.2f} is shown alongside "
+            f"so the distinction is visible."
         )
     elif fit.b <= 0:
         resolution = Resolution.OSCILLATORY

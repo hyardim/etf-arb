@@ -108,7 +108,7 @@ def test_matrix_is_symmetric_with_true_diagonal():
     assert all(m.loc[x, x] for x in m.index)
 
 
-def test_censored_funds_excluded_from_separation():
+def test_unresolved_funds_excluded_from_separation():
     """A censored fund has no point estimate, so it cannot be ordered against
     anything and must not silently count as separated."""
     funds = _real_shaped_universe() + [
@@ -116,7 +116,7 @@ def test_censored_funds_excluded_from_separation():
             ticker="SPY", sleeve="equity_us_large", role="control", foreign_session=False,
             n=2184, mean_premium_bps=0.3, sd_premium_bps=4.7,
             min_premium_bps=-80.0, max_premium_bps=90.0, pct_days_premium=57.7,
-            resolution=Resolution.CENSORED_FAST, half_life=np.nan,
+            resolution=Resolution.UNRESOLVED, half_life=np.nan,
             half_life_display="< 0.34 d (censored)",
             bootstrap_ci=None, delta_ci=None, adf_pvalue=1e-19, b=-0.007,
             adv_usd_m=30342.0, intraday_range_bps=96.0, vr_2=0.45, vr_20=0.05,

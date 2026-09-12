@@ -5,10 +5,11 @@ finding -- it is what shows the within-credit ordering is unresolved -- and
 bars would invite reading magnitude from zero while burying the uncertainty
 inside them.
 
-Censored funds appear on the same axis as left-pointing arrows at their upper
-bound, so that "faster than we can measure" sits in the ordering rather than
-being dropped from the figure. Omitting them would make the equity group look
-thinner than it is.
+Unresolved funds appear on the same axis as left-pointing arrows at their
+upper bound, so "not measurable here" sits in the ordering rather than being
+dropped from the figure. The arrow length carries real information: SPY's
+short arrow to 0.34 d means reversion genuinely is fast, while ITOT's long
+arrow to 0.99 d means it is unmeasurable, not quick.
 """
 
 from __future__ import annotations
@@ -83,7 +84,7 @@ def plot_cross_section(results, *, ax=None, title=None):
     ]
     handles.append(
         plt.Line2D([], [], color=INK_MUTED, lw=1.6, marker="|", ms=10,
-                   label="censored: upper bound only")
+                   label="unresolved: upper bound only")
     )
     ax.legend(handles=handles, loc="lower right", fontsize=8.5)
     return ax
