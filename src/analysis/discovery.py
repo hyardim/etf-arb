@@ -32,6 +32,19 @@ predicts the next Nikkei session with slope +0.92 (t = 18.2, R^2 = 0.140),
 while the same-session and previous-session placebos sit at R^2 = 0.006 and
 0.010. A 100bp closing premium is followed by the Nikkei opening about 92bp
 higher.
+
+WHAT THIS DOES NOT MEAN. Establishing that the premium carries information is
+not the same as establishing that the information is new. CME Nikkei futures
+trade nearly 24 hours, so the price of Japan risk keeps updating while Tokyo
+cash is shut. Regressed against futures rather than the cash index, the EWJ
+premium moves one-for-one with the SAME day's futures move (slope +1.031,
+t = 23.0) and predicts essentially nothing the next day (R^2 = 0.003).
+
+So the premium mirrors what futures have already priced; the Nikkei CASH index
+is the stale object that makes the forward regression look predictive. The
+result is a correct statement about price discovery and a false lead about
+tradeability: the premium measures how far the stale Tokyo cash close has
+drifted from a live market that is already quoted continuously elsewhere.
 """
 
 from __future__ import annotations
