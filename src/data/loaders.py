@@ -22,6 +22,8 @@ absence is positive proof that adjustment leaked in.
 from __future__ import annotations
 
 import logging
+import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pandas as pd
@@ -247,21 +249,121 @@ class NavDataError(RuntimeError):
     """Raised when a NAV file is not what it claims to be."""
 
 
-def _reject_markup(text: str, path: Path) -> None:
-    """The iShares failure mode, caught on the only signal that did not lie.
+_SSML_NS = {"ss": "urn:schemas-microsoft-com:office:spreadsheet"}
+_SSML_ATTR = "{urn:schemas-microsoft-com:office:spreadsheet}"
 
-    Checks the first non-whitespace byte rather than the content type or the
-    file extension, both of which reported ``text/csv`` while serving HTML.
+# Matches an ampersand that is NOT already a well-formed XML entity.
+_BARE_AMP = re.compile(r"&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9A-Fa-f]+);)")
+
+
+def _sniff_format(text: str, path: Path) -> str:
+    """Decide what the file actually is, from its bytes.
+
+    The extension is not evidence: the iShares "Data Download" button produces
+    a file named .xls that is neither a binary Excel workbook nor a CSV, but
+    SpreadsheetML 2003 (XML). Meanwhile a URL ending in .csv served the
+    product page as HTML. So both the extension and the content type have been
+    observed lying in opposite directions, and only the leading bytes are
+    trustworthy.
+
+    Returns:
+        "csv" or "spreadsheetml".
+
+    Raises:
+        NavDataError: if the content is an HTML page rather than data.
     """
-    stripped = text.lstrip()
-    if stripped.startswith(("<", "﻿<")):
-        first = stripped.splitlines()[0][:80] if stripped.splitlines() else ""
+    head = text.lstrip()[:4000].lower()
+
+    if head.startswith("<!doctype html") or head.startswith("<html") or "<head>" in head[:2000]:
+        first = text.lstrip().splitlines()[0][:80] if text.strip() else ""
         raise NavDataError(
-            f"{path.name} is markup, not CSV (starts with {first!r}). Issuer sites "
-            f"serve their product page with Content-Type: text/csv when a download "
-            f"link is fetched without a browser -- re-download it by hand from the "
-            f"fund page and save the file the browser produces."
+            f"{path.name} is an HTML page, not NAV data (starts with {first!r}). "
+            f"Issuer sites serve their product page -- with Content-Type: text/csv -- "
+            f"when a download URL is fetched without a browser. Re-download by hand "
+            f"from the fund page and save the file the browser produces."
         )
+
+    if head.startswith("<?xml") or "<ss:workbook" in head or "<workbook" in head:
+        return "spreadsheetml"
+
+    if text.lstrip().startswith("<"):
+        first = text.lstrip().splitlines()[0][:80]
+        raise NavDataError(
+            f"{path.name} is markup of an unrecognised kind (starts with {first!r}); "
+            f"expected CSV or SpreadsheetML."
+        )
+
+    return "csv"
+
+
+def _ssml_row_values(row) -> list[str]:
+    """Read one SpreadsheetML row, honouring ss:Index.
+
+    A cell carrying ss:Index="4" means columns were skipped, so values must be
+    placed positionally rather than appended -- otherwise a row with a blank
+    cell silently shifts every later value one column to the left.
+    """
+    values: list[str] = []
+    for cell in row.findall("ss:Cell", _SSML_NS):
+        index = cell.get(_SSML_ATTR + "Index")
+        if index is not None:
+            target = int(index) - 1
+            while len(values) < target:
+                values.append("")
+        data = cell.find("ss:Data", _SSML_NS)
+        values.append("" if data is None or data.text is None else data.text.strip())
+    return values
+
+
+def _read_spreadsheetml(text: str, path: Path) -> pd.DataFrame:
+    """Parse a SpreadsheetML workbook and return the NAV history sheet.
+
+    iShares exports several sheets (Holdings, Historical, Performance,
+    Distributions). The right one is found by looking for a header row that
+    carries both a date and a NAV column, for the same reason the CSV path
+    sniffs its header: sheet names and orderings are not contractual.
+    """
+    # iShares emits invalid XML -- hyperlink attributes contain raw "&"
+    # (e.g. "?type=ishares&style=All"), which strict parsers reject outright.
+    # Escape bare ampersands before parsing rather than requiring a lenient
+    # third-party parser.
+    repaired, n_fixed = _BARE_AMP.subn("&amp;", text)
+    if n_fixed:
+        logger.debug("%s: escaped %d bare ampersand(s)", path.name, n_fixed)
+
+    try:
+        root = ET.fromstring(repaired)
+    except ET.ParseError as exc:
+        raise NavDataError(f"{path.name}: could not parse as SpreadsheetML: {exc}") from exc
+
+    worksheets = root.findall("ss:Worksheet", _SSML_NS)
+    if not worksheets:
+        raise NavDataError(f"{path.name}: SpreadsheetML file contains no worksheets")
+
+    seen: list[str] = []
+    for sheet in worksheets:
+        name = sheet.get(_SSML_ATTR + "Name", "?")
+        seen.append(name)
+        rows = [_ssml_row_values(r) for r in sheet.findall(".//ss:Row", _SSML_NS)]
+
+        for i, cells in enumerate(rows[:80]):
+            normalised = {_normalise_header(c) for c in cells}
+            if not (normalised & _DATE_ALIASES and normalised & _NAV_ALIASES):
+                continue
+
+            header = cells
+            body = [r for r in rows[i + 1 :] if any(c for c in r)]
+            width = len(header)
+            body = [(r + [""] * width)[:width] for r in body]
+            logger.info(
+                "%s: using worksheet %r (%d data rows)", path.name, name, len(body)
+            )
+            return pd.DataFrame(body, columns=header)
+
+    raise NavDataError(
+        f"{path.name}: no worksheet has a header row with both a date and a NAV "
+        f"column. Worksheets present: {seen}"
+    )
 
 
 def _normalise_header(value: object) -> str:
@@ -314,12 +416,15 @@ def _to_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(cleaned, errors="coerce")
 
 
-def load_nav_csv(
+def load_nav_file(
     path: Path | str,
     *,
     min_rows: int = MIN_NAV_ROWS,
 ) -> pd.Series:
     """Load a hand-downloaded issuer NAV history file.
+
+    Accepts CSV or SpreadsheetML 2003, detected from content rather than from
+    the file extension -- iShares names its SpreadsheetML export ".xls".
 
     Every check refuses rather than repairs. A NAV series that is quietly
     wrong produces a premium series that is quietly wrong, and nothing
@@ -329,9 +434,9 @@ def load_nav_csv(
         Series named ``nav`` indexed by tz-naive normalised date, ascending.
 
     Raises:
-        NavDataError: if the file is markup, has no recognisable header, has
-            duplicate or unparseable dates, contains non-positive NAV, or is
-            shorter than ``min_rows``.
+        NavDataError: if the file is an HTML page, has no recognisable header,
+            has duplicate or unparseable dates, contains non-positive NAV, or
+            is shorter than ``min_rows``.
     """
     path = Path(path)
     if not path.exists():
@@ -341,14 +446,17 @@ def load_nav_csv(
         )
 
     text = path.read_text(encoding="utf-8-sig", errors="replace")
-    _reject_markup(text, path)
-
-    lines = text.splitlines()
-    if not lines:
+    if not text.strip():
         raise NavDataError(f"{path.name} is empty")
 
-    header_row = _find_header_row(lines, path)
-    frame = pd.read_csv(path, skiprows=header_row, encoding="utf-8-sig")
+    kind = _sniff_format(text, path)
+
+    if kind == "spreadsheetml":
+        frame = _read_spreadsheetml(text, path)
+    else:
+        header_row = _find_header_row(text.splitlines(), path)
+        frame = pd.read_csv(path, skiprows=header_row, encoding="utf-8-sig")
+
     if frame.empty:
         raise NavDataError(f"{path.name}: no data rows below the header")
 
