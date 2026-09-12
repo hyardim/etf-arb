@@ -256,22 +256,33 @@ _SSML_ATTR = "{urn:schemas-microsoft-com:office:spreadsheet}"
 _BARE_AMP = re.compile(r"&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9A-Fa-f]+);)")
 
 
-def _sniff_format(text: str, path: Path) -> str:
-    """Decide what the file actually is, from its bytes.
+def _sniff_format(raw: bytes, path: Path) -> str:
+    """Decide what the file actually is, from its leading bytes.
 
-    The extension is not evidence: the iShares "Data Download" button produces
-    a file named .xls that is neither a binary Excel workbook nor a CSV, but
-    SpreadsheetML 2003 (XML). Meanwhile a URL ending in .csv served the
-    product page as HTML. So both the extension and the content type have been
-    observed lying in opposite directions, and only the leading bytes are
-    trustworthy.
+    The extension is not evidence. Three formats have turned up so far and the
+    name predicted the content in none of them reliably:
+
+    - iShares "Data Download" gives a file named .xls that is SpreadsheetML
+      2003 (XML text), not a binary workbook.
+    - SSGA gives a real OOXML .xlsx (a ZIP, magic "PK\x03\x04").
+    - A URL ending .csv served an HTML product page under Content-Type
+      text/csv.
+
+    So the extension has been observed lying in both directions, and content
+    type with it. Only the bytes are trustworthy.
 
     Returns:
-        "csv" or "spreadsheetml".
+        "xlsx", "spreadsheetml", or "csv".
 
     Raises:
         NavDataError: if the content is an HTML page rather than data.
     """
+    # OOXML is a ZIP container. Checked first because it is binary and must
+    # not be decoded as text.
+    if raw[:4] == b"PK\x03\x04":
+        return "xlsx"
+
+    text = raw.decode("utf-8-sig", errors="replace")
     head = text.lstrip()[:4000].lower()
 
     if head.startswith("<!doctype html") or head.startswith("<html") or "<head>" in head[:2000]:
@@ -290,10 +301,40 @@ def _sniff_format(text: str, path: Path) -> str:
         first = text.lstrip().splitlines()[0][:80]
         raise NavDataError(
             f"{path.name} is markup of an unrecognised kind (starts with {first!r}); "
-            f"expected CSV or SpreadsheetML."
+            f"expected CSV, SpreadsheetML or xlsx."
         )
 
     return "csv"
+
+
+def _read_xlsx(path: Path) -> pd.DataFrame:
+    """Read a real OOXML workbook, locating the header by content.
+
+    SSGA prefixes its NAV export with fund name and ticker rows, so the table
+    does not start at row 0. As with the other two formats, the header is
+    found by looking for a row carrying both a date and a NAV column rather
+    than by assuming a fixed offset.
+    """
+    sheets = pd.read_excel(path, sheet_name=None, header=None, engine="openpyxl")
+    if not sheets:
+        raise NavDataError(f"{path.name}: workbook contains no sheets")
+
+    for name, raw in sheets.items():
+        for i in range(min(80, len(raw))):
+            cells = {_normalise_header(c) for c in raw.iloc[i].tolist()}
+            if cells & _DATE_ALIASES and cells & _NAV_ALIASES:
+                frame = raw.iloc[i + 1 :].copy()
+                frame.columns = [str(c) for c in raw.iloc[i].tolist()]
+                frame = frame.dropna(how="all")
+                logger.info(
+                    "%s: using sheet %r (%d data rows)", path.name, name, len(frame)
+                )
+                return frame
+
+    raise NavDataError(
+        f"{path.name}: no sheet has a header row with both a date and a NAV "
+        f"column. Sheets present: {list(sheets)}"
+    )
 
 
 def _ssml_row_values(row) -> list[str]:
@@ -423,8 +464,9 @@ def load_nav_file(
 ) -> pd.Series:
     """Load a hand-downloaded issuer NAV history file.
 
-    Accepts CSV or SpreadsheetML 2003, detected from content rather than from
-    the file extension -- iShares names its SpreadsheetML export ".xls".
+    Accepts CSV, SpreadsheetML 2003, or OOXML xlsx, detected from content
+    rather than from the file extension -- iShares names its SpreadsheetML
+    export ".xls", and a .csv URL has served HTML.
 
     Every check refuses rather than repairs. A NAV series that is quietly
     wrong produces a premium series that is quietly wrong, and nothing
@@ -445,15 +487,18 @@ def load_nav_file(
             f"issuer -- see docs/NAV_SOURCES.md."
         )
 
-    text = path.read_text(encoding="utf-8-sig", errors="replace")
-    if not text.strip():
+    raw = path.read_bytes()
+    if not raw.strip():
         raise NavDataError(f"{path.name} is empty")
 
-    kind = _sniff_format(text, path)
+    kind = _sniff_format(raw, path)
 
-    if kind == "spreadsheetml":
-        frame = _read_spreadsheetml(text, path)
+    if kind == "xlsx":
+        frame = _read_xlsx(path)
+    elif kind == "spreadsheetml":
+        frame = _read_spreadsheetml(raw.decode("utf-8-sig", errors="replace"), path)
     else:
+        text = raw.decode("utf-8-sig", errors="replace")
         header_row = _find_header_row(text.splitlines(), path)
         frame = pd.read_csv(path, skiprows=header_row, encoding="utf-8-sig")
 
