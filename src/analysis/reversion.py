@@ -20,8 +20,13 @@ measurement and a guess.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -133,3 +138,86 @@ def simulate_ar1(
         path[t] = a + b * path[t - 1] + shocks[t]
 
     return path
+
+
+# ==========================================================================
+# AR(1) estimation
+# ==========================================================================
+
+import statsmodels.api as sm  # noqa: E402
+
+
+@dataclass(frozen=True)
+class AR1Fit:
+    """Raw AR(1) regression output, before any half-life interpretation."""
+
+    n: int
+    a: float
+    b: float
+    b_se: float
+    b_tstat: float
+    b_pvalue: float
+    """Two-sided p-value for H0: b = 0, i.e. no persistence at all."""
+    resid_sd: float
+
+    @property
+    def long_run(self) -> float:
+        """Equilibrium level a/(1-b). Undefined at b = 1."""
+        return float(self.a / (1.0 - self.b)) if self.b != 1.0 else float("nan")
+
+
+def fit_ar1(x: np.ndarray | "pd.Series", *, cov_type: str = "HC1") -> AR1Fit:
+    """Fit x[t+1] = a + b*x[t] + e by OLS with robust standard errors.
+
+    HC1 is used because premium residuals are strongly heteroskedastic --
+    variance is an order of magnitude larger in stress periods than in calm
+    ones, as the 2020 column of the HYG sample shows. Classical standard
+    errors would understate uncertainty exactly where it is largest.
+    """
+    values = np.asarray(x, dtype=float).ravel()
+    values = values[np.isfinite(values)]
+    if values.size < 3:
+        raise ValueError(f"need at least 3 finite observations, got {values.size}")
+
+    lagged, current = values[:-1], values[1:]
+    design = sm.add_constant(lagged, has_constant="add")
+    res = sm.OLS(current, design).fit(cov_type=cov_type)
+
+    return AR1Fit(
+        n=int(current.size),
+        a=float(res.params[0]),
+        b=float(res.params[1]),
+        b_se=float(res.bse[1]),
+        b_tstat=float(res.tvalues[1]),
+        b_pvalue=float(res.pvalues[1]),
+        resid_sd=float(np.std(res.resid, ddof=2)),
+    )
+
+
+def half_life_from_b(b: float) -> float:
+    """Convert an AR(1) coefficient to a half-life in periods.
+
+    Returns NaN where no finite half-life exists:
+
+    - ``b >= 1``  non-stationary. Shocks never decay, so there is nothing to
+      halve. A "half-life" computed anyway is arbitrarily large and unstable
+      across subsamples.
+    - ``b <= 0``  oscillatory rather than decaying. The series alternates sign
+      instead of relaxing toward a mean, so the half-life concept does not
+      apply. Bid-ask bounce in a closing-price series induces exactly this.
+
+    Both cases are returned as NaN rather than raising, so a cross-sectional
+    run can report "no finite half-life" for one fund and carry on.
+    """
+    if not np.isfinite(b) or b <= 0.0 or b >= 1.0:
+        return float("nan")
+    return float(np.log(2.0) / -np.log(b))
+
+
+def estimate_half_life(x: np.ndarray | "pd.Series", *, cov_type: str = "HC1") -> float:
+    """Estimate the half-life of mean reversion, in sampling periods.
+
+    The direct interface used by the validation tests: feed a simulated path
+    with a known half-life and confirm the value comes back.
+    """
+    return half_life_from_b(fit_ar1(x, cov_type=cov_type).b)
