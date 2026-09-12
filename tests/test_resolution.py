@@ -140,13 +140,17 @@ def test_identified_display_is_a_number():
 
 
 def test_boundary_between_censored_and_identified():
-    """Around 0.25 days the two regimes meet; both outcomes are legitimate,
-    but a censored verdict must never carry a point estimate and an identified
-    one must never carry a bound."""
+    """Around 0.25 days the regimes meet. Either verdict is legitimate there,
+    but the two must never be confused: a censored result carries a bound and
+    no estimate, an identified one carries an estimate and no bound."""
     r = estimate_reversion(
         simulate_ou(half_life_to_kappa(0.25), SAMPLE_N, seed=1), ticker="EDGE"
     )
-    assert r.resolution in (Resolution.CENSORED_FAST, Resolution.IDENTIFIED)
+    assert r.resolution in (
+        Resolution.CENSORED_FAST,
+        Resolution.IDENTIFIED_SUBDAILY,
+        Resolution.IDENTIFIED,
+    )
     if r.is_identified:
         assert np.isfinite(r.half_life)
         assert np.isnan(r.half_life_upper_bound)
@@ -183,3 +187,75 @@ def test_alpha_is_configurable():
 def test_short_series_raises():
     with pytest.raises(ValueError, match="at least 20"):
         estimate_reversion(np.arange(10.0), ticker="TINY")
+
+
+# --------------------------------------------------------------------------
+# Sub-daily identification
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("true_hl", [0.3, 0.5, 0.8])
+def test_half_life_below_sampling_interval_is_flagged_subdaily(true_hl):
+    """Real, but describing decay that mostly happens between observations.
+
+    These pass both statistical tests -- persistence is distinguishable from
+    zero and from a unit root -- so censoring them would discard a genuine
+    result. But a half-life shorter than the gap between observations is not
+    a measurement in the same sense as a multi-day one, and it must not sit
+    unmarked in a column beside LQD's 1.49 days.
+    """
+    r = estimate_reversion(simulate_ou(half_life_to_kappa(true_hl), SAMPLE_N, seed=1), ticker="F")
+    assert r.resolution is Resolution.IDENTIFIED_SUBDAILY
+    assert r.half_life == pytest.approx(true_hl, rel=0.3)
+    assert "sub-daily" in r.display
+
+
+@pytest.mark.parametrize("true_hl", [1.5, 3.0, 8.0])
+def test_multi_day_half_lives_stay_plain_identified(true_hl):
+    """The guard must not swallow the funds carrying the cross-sectional
+    result. HYG, EMB and LQD all live here."""
+    r = estimate_reversion(simulate_ou(half_life_to_kappa(true_hl), SAMPLE_N, seed=1), ticker="F")
+    assert r.resolution is Resolution.IDENTIFIED
+    assert "sub-daily" not in r.display
+
+
+def test_subdaily_still_counts_as_identified():
+    """is_identified means 'a usable point estimate exists', which sub-daily
+    results do have -- unlike censored or unit-root ones."""
+    r = estimate_reversion(simulate_ou(half_life_to_kappa(0.4), SAMPLE_N, seed=1), ticker="F")
+    assert r.is_identified
+    assert r.is_subdaily
+    assert np.isfinite(r.half_life)
+
+
+def test_too_fast_is_censored_rather_than_subdaily():
+    """The three tiers must stay distinct. Below roughly 0.1 days the series
+    is indistinguishable from white noise, and then no point estimate is
+    warranted at all."""
+    r = estimate_reversion(simulate_ou(half_life_to_kappa(0.05), SAMPLE_N, seed=1), ticker="F")
+    assert r.resolution is Resolution.CENSORED_FAST
+    assert np.isnan(r.half_life)
+
+
+def test_sampling_interval_is_configurable():
+    """Nothing about the boundary is specific to daily data. With hourly
+    observations the same series would be fully resolved."""
+    path = simulate_ou(half_life_to_kappa(0.5), SAMPLE_N, seed=1)
+    daily = estimate_reversion(path, ticker="F", sampling_interval=1.0)
+    finer = estimate_reversion(path, ticker="F", sampling_interval=0.1)
+    assert daily.resolution is Resolution.IDENTIFIED_SUBDAILY
+    assert finer.resolution is Resolution.IDENTIFIED
+
+
+def test_subdaily_results_still_get_intervals():
+    r = estimate_reversion(
+        simulate_ou(half_life_to_kappa(0.4), SAMPLE_N, seed=1),
+        ticker="F", intervals=True, n_boot=200,
+    )
+    assert r.bootstrap_ci is not None and r.bootstrap_ci.is_defined
+    assert r.delta_ci is not None
+
+
+def test_reason_explains_the_limitation():
+    r = estimate_reversion(simulate_ou(half_life_to_kappa(0.4), SAMPLE_N, seed=1), ticker="F")
+    assert "between observations" in r.reason

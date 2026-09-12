@@ -277,7 +277,18 @@ class Resolution(StrEnum):
     """Whether a half-life is identified, and if not, why not."""
 
     IDENTIFIED = "identified"
-    """Distinguishable from both a random walk and white noise."""
+    """Distinguishable from both a random walk and white noise, with a
+    half-life longer than the sampling interval."""
+
+    IDENTIFIED_SUBDAILY = "identified_subdaily"
+    """Statistically identified, but the point estimate falls BELOW one
+    sampling interval.
+
+    The estimate is real -- persistence is distinguishable from zero -- yet it
+    describes a process that mostly completes between observations. Daily
+    closes can establish that reversion is fast without pinning down how fast,
+    and the fitted value depends on the tail of the distribution rather than
+    on directly observed decay. Reported as a number, labelled as partial."""
 
     CENSORED_FAST = "censored_fast"
     """Reverts faster than daily sampling can resolve. Only an upper bound."""
@@ -311,13 +322,23 @@ class ReversionResult:
 
     @property
     def is_identified(self) -> bool:
-        return self.resolution is Resolution.IDENTIFIED
+        """True when a usable point estimate exists, sub-daily included."""
+        return self.resolution in (
+            Resolution.IDENTIFIED,
+            Resolution.IDENTIFIED_SUBDAILY,
+        )
+
+    @property
+    def is_subdaily(self) -> bool:
+        return self.resolution is Resolution.IDENTIFIED_SUBDAILY
 
     @property
     def display(self) -> str:
         """Human-readable half-life, never a bare number."""
         if self.resolution is Resolution.IDENTIFIED:
             return f"{self.half_life:.2f} d"
+        if self.resolution is Resolution.IDENTIFIED_SUBDAILY:
+            return f"{self.half_life:.2f} d (sub-daily)"
         if self.resolution is Resolution.CENSORED_FAST:
             return f"< {self.half_life_upper_bound:.2f} d (censored)"
         return f"n/a ({self.resolution.value})"
@@ -352,6 +373,7 @@ def estimate_reversion(
     intervals: bool = False,
     n_boot: int = DEFAULT_N_BOOTSTRAP,
     seed: int | None = 0,
+    sampling_interval: float = 1.0,
 ) -> ReversionResult:
     """Estimate a half-life and classify whether it is identified.
 
@@ -369,6 +391,9 @@ def estimate_reversion(
         ticker: Label for reporting.
         alpha: Significance level for both tests.
         cov_type: Covariance estimator for the AR(1) fit.
+        sampling_interval: One observation spacing, in the units the half-life
+            is reported in. Daily closes give 1.0. An identified half-life
+            below this is labelled IDENTIFIED_SUBDAILY.
     """
     values = np.asarray(x, dtype=float).ravel()
     values = values[np.isfinite(values)]
@@ -413,14 +438,25 @@ def estimate_reversion(
         )
     else:
         half_life = half_life_from_b(fit.b)
-        resolution = Resolution.IDENTIFIED
-        reason = (
-            f"Distinguishable from both a random walk (ADF p={adf_pvalue:.3g}) and "
-            f"white noise (p(b=0)={fit.b_pvalue:.3g})."
-        )
+        if half_life < sampling_interval:
+            resolution = Resolution.IDENTIFIED_SUBDAILY
+            reason = (
+                f"Distinguishable from both a random walk (ADF p={adf_pvalue:.3g}) and "
+                f"white noise (p(b=0)={fit.b_pvalue:.3g}), but the estimated half-life "
+                f"of {half_life:.2f} is SHORTER than the {sampling_interval:g}-period "
+                f"sampling interval. Most of the decay happens between observations, so "
+                f"the value establishes that reversion is fast without pinning down how "
+                f"fast. Treat as an order of magnitude, not a measurement."
+            )
+        else:
+            resolution = Resolution.IDENTIFIED
+            reason = (
+                f"Distinguishable from both a random walk (ADF p={adf_pvalue:.3g}) and "
+                f"white noise (p(b=0)={fit.b_pvalue:.3g})."
+            )
 
     boot_ci = delta_ci = None
-    if intervals and resolution is Resolution.IDENTIFIED:
+    if intervals and resolution in (Resolution.IDENTIFIED, Resolution.IDENTIFIED_SUBDAILY):
         # Only meaningful where a point estimate exists. A censored or
         # unit-root series has no half-life to put an interval around.
         delta_ci = delta_method_interval(fit.b, fit.b_se, level=1.0 - alpha)
