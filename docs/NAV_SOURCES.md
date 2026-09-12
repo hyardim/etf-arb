@@ -86,17 +86,20 @@ Expect roughly 2,180 rows for a full 2018-01-01 → 2026-09 daily series.
 | Ticker | Issuer | Product page | Date pulled | Rows | First | Last |
 |---|---|---|---|---|---|---|
 | `HYG` | iShares | https://www.ishares.com/us/products/239565/ — "Data Download" | 2026-09-12 | 4,893 | 2007-04-04 | 2026-09-11 |
-| `IVV` | iShares | https://www.ishares.com/us/products/239726/ | _pending_ | | | |
-| `ITOT` | iShares | https://www.ishares.com/us/products/239724/ | _pending_ | | | |
-| `EWJ` | iShares | https://www.ishares.com/us/products/239665/ | _pending_ | | | |
-| `LQD` | iShares | https://www.ishares.com/us/products/239566/ | _pending_ | | | |
-| `EMB` | iShares | https://www.ishares.com/us/products/239572/ | _pending_ | | | |
-| `EEM` | iShares | https://www.ishares.com/us/products/239637/ | _pending_ | | | |
+| `IVV` | iShares | https://www.ishares.com/us/products/239726/ — "Data Download" | 2026-09-12 | 6,623 | 2000-05-15 | 2026-09-11 |
+| `ITOT` | iShares | https://www.ishares.com/us/products/239724/ — "Data Download" | 2026-09-12 | 5,722 | 2004-01-20 | 2026-09-11 |
+| `EWJ` | iShares | https://www.ishares.com/us/products/239665/ — "Data Download" | 2026-09-12 | 7,677 | 1996-03-12 | 2026-09-11 |
+| `LQD` | iShares | https://www.ishares.com/us/products/239566/ — "Data Download" | 2026-09-12 | 6,077 | 2002-07-22 | 2026-09-11 |
+| `EMB` | iShares | https://www.ishares.com/us/products/239572/ — "Data Download" | 2026-09-12 | 4,717 | 2007-12-17 | 2026-09-11 |
+| `EEM` | iShares | https://www.ishares.com/us/products/239637/ — "Data Download" | 2026-09-12 | 5,928 | 2003-04-07 | 2026-09-11 |
 | `SPY` | SSGA | [navhist-us-en-spy.xlsx](https://www.ssga.com/library-content/products/fund-data/etfs/us/navhist-us-en-spy.xlsx) (direct, scriptable) | 2026-09-12 | 5,733 | 2003-12-01 | 2026-09-10 |
 
-> Product-page IDs above are recorded from the iShares URL scheme and should be
-> confirmed on arrival — verify the page you land on names the expected fund
-> before exporting.
+> Every file was verified by CONTENT, not filename. Each downloaded NAV series
+> was checked against its candidate ticker's actual market price before being
+> renamed into place: all six iShares files matched at correlation >= 0.999 with
+> level gaps under 0.25%. The browser names these exports after the fund
+> ("iShares-Core-SP-500-ETF_fund.xls"), never the ticker, so a mix-up is easy
+> and silent.
 
 `HYG` was built end to end first, before any other fund was added, because
 every data-quality problem shows up on the first fund and fixing it once is far
