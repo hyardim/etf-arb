@@ -265,9 +265,12 @@ def estimate_half_life(x: np.ndarray | "pd.Series", *, cov_type: str = "HC1") ->
 
 from enum import StrEnum  # noqa: E402
 
+from scipy import stats as scipy_stats  # noqa: E402
 from statsmodels.tsa.stattools import adfuller  # noqa: E402
 
 DEFAULT_ALPHA = 0.05
+DEFAULT_N_BOOTSTRAP = 2000
+DEFAULT_CI_LEVEL = 0.95
 
 
 class Resolution(StrEnum):
@@ -303,6 +306,8 @@ class ReversionResult:
     b. NaN otherwise."""
     reason: str
     alpha: float
+    bootstrap_ci: Interval | None = None
+    delta_ci: Interval | None = None
 
     @property
     def is_identified(self) -> bool:
@@ -344,6 +349,9 @@ def estimate_reversion(
     ticker: str = "",
     alpha: float = DEFAULT_ALPHA,
     cov_type: str = "HC1",
+    intervals: bool = False,
+    n_boot: int = DEFAULT_N_BOOTSTRAP,
+    seed: int | None = 0,
 ) -> ReversionResult:
     """Estimate a half-life and classify whether it is identified.
 
@@ -411,6 +419,13 @@ def estimate_reversion(
             f"white noise (p(b=0)={fit.b_pvalue:.3g})."
         )
 
+    boot_ci = delta_ci = None
+    if intervals and resolution is Resolution.IDENTIFIED:
+        # Only meaningful where a point estimate exists. A censored or
+        # unit-root series has no half-life to put an interval around.
+        delta_ci = delta_method_interval(fit.b, fit.b_se, level=1.0 - alpha)
+        boot_ci = bootstrap_interval(values, n_boot=n_boot, level=1.0 - alpha, seed=seed)
+
     result = ReversionResult(
         ticker=ticker,
         n=fit.n,
@@ -422,6 +437,219 @@ def estimate_reversion(
         half_life_upper_bound=upper_bound,
         reason=reason,
         alpha=alpha,
+        bootstrap_ci=boot_ci,
+        delta_ci=delta_ci,
     )
     logger.info("%s", result.summary())
     return result
+
+
+# ==========================================================================
+# Confidence intervals
+# ==========================================================================
+#
+# A half-life without an interval cannot support the claim this project is
+# for. The headline is a COMPARISON -- credit reverts more slowly than equity
+# -- and a comparison only holds if the intervals do not overlap. "0.94 days"
+# beside "1.32 days" means nothing until you know how far either could have
+# landed by luck.
+#
+# Two methods, reported together, because their disagreement is a diagnostic.
+#
+# DELTA METHOD propagates SE(b) through h(b) = ln2 / -ln(b) using a
+# first-order Taylor expansion: over a small range the curve is approximately
+# a straight line, so SE(h) = |dh/db| * SE(b). The derivative is an
+# amplification factor, and it varies a lot across these funds -- 1.3x for
+# IVV, 2.6x for HYG, 5.1x for LQD. That is why LQD's interval is so much
+# wider: its b is both less precisely measured AND sits where the curve is
+# steepest. The approximation degrades as b approaches 0 or 1, where the
+# derivative diverges, which is exactly where several of these funds live.
+#
+# BLOCK BOOTSTRAP resamples the series in contiguous blocks -- preserving the
+# serial dependence that IS the signal here, and which an ordinary bootstrap
+# would destroy -- then re-estimates the half-life on each replicate. It
+# assumes far less, and is the primary number.
+#
+# Expect the bootstrap WIDER than delta for the credit funds: residuals are
+# strongly heteroskedastic and cluster in 2020. Narrower would be a bug signal.
+
+from typing import Callable  # noqa: E402
+
+
+@dataclass(frozen=True)
+class Interval:
+    """A confidence interval and how it was produced."""
+
+    lower: float
+    upper: float
+    method: str
+    level: float = DEFAULT_CI_LEVEL
+    n_valid: int = 0
+    """Bootstrap only: replicates that produced a finite half-life."""
+
+    @property
+    def width(self) -> float:
+        return float(self.upper - self.lower)
+
+    @property
+    def is_defined(self) -> bool:
+        return bool(np.isfinite(self.lower) and np.isfinite(self.upper))
+
+    def contains(self, value: float) -> bool:
+        return bool(self.lower <= value <= self.upper)
+
+    def overlaps(self, other: "Interval") -> bool:
+        """Whether two intervals overlap -- the test behind every ranking
+        claim in the cross-section."""
+        if not (self.is_defined and other.is_defined):
+            return True  # undefined cannot be claimed distinguishable
+        return self.lower <= other.upper and other.lower <= self.upper
+
+    def __str__(self) -> str:
+        return f"[{self.lower:.2f}, {self.upper:.2f}]" if self.is_defined else "[undefined]"
+
+
+def delta_method_interval(b: float, b_se: float, *, level: float = DEFAULT_CI_LEVEL) -> Interval:
+    """Half-life interval by first-order delta method.
+
+        h(b)  = ln2 / -ln(b)
+        dh/db = ln2 / (b * (ln b)^2)
+        SE(h) = |dh/db| * SE(b)
+
+    The derivative diverges as b approaches 0 or 1. That is the method
+    honestly reporting that the transformation is badly behaved there, not a
+    numerical artefact to clip away.
+    """
+    half_life = half_life_from_b(b)
+    if not np.isfinite(half_life) or b_se <= 0:
+        return Interval(float("nan"), float("nan"), "delta", level)
+
+    z = float(scipy_stats.norm.ppf(0.5 + level / 2.0))
+    derivative = np.log(2.0) / (b * np.log(b) ** 2)
+    se = abs(derivative) * b_se
+
+    # A negative half-life is meaningless; floor the lower bound at zero.
+    return Interval(
+        lower=float(max(0.0, half_life - z * se)),
+        upper=float(half_life + z * se),
+        method="delta",
+        level=level,
+    )
+
+
+def stationary_bootstrap_indices(
+    n: int, expected_block: float, rng: np.random.Generator
+) -> np.ndarray:
+    """Indices for one Politis-Romano stationary bootstrap replicate.
+
+    Blocks are contiguous runs of the original series, wrapping at the end,
+    with GEOMETRICALLY distributed lengths averaging ``expected_block``.
+
+    Contiguity is the essential part: this series' day-to-day memory is the
+    quantity being measured, and resampling individual days would destroy it,
+    driving every replicate's b toward zero. Random rather than fixed block
+    lengths are what make the resampled series stationary, avoiding an
+    artefact at the block seams.
+    """
+    p = 1.0 / expected_block
+    idx = np.empty(n, dtype=np.int64)
+    current = int(rng.integers(0, n))
+    for i in range(n):
+        idx[i] = current
+        if rng.random() < p:
+            current = int(rng.integers(0, n))  # start a new block
+        else:
+            current = (current + 1) % n  # continue the current one
+    return idx
+
+
+def bootstrap_interval(
+    x: np.ndarray | "pd.Series",
+    *,
+    n_boot: int = DEFAULT_N_BOOTSTRAP,
+    level: float = DEFAULT_CI_LEVEL,
+    expected_block: float | None = None,
+    seed: int | None = 0,
+    statistic: Callable[[np.ndarray], float] | None = None,
+) -> Interval:
+    """Half-life interval by stationary block bootstrap.
+
+    Each replicate rebuilds a same-length series from random contiguous
+    blocks, refits the AR(1), and converts to a half-life. The interval is
+    read off the percentiles of those replicate half-lives.
+
+    Each replicate is transformed to a half-life BEFORE percentiles are taken.
+    For percentile intervals this is not about skew -- quantiles are
+    equivariant under a monotone transform, so the two orders agree exactly.
+    It matters because a replicate landing on b <= 0 or b >= 1 has no
+    half-life at all, and transforming first lets those be counted and
+    excluded explicitly rather than silently folded in.
+
+    Args:
+        x: Series, typically premium in bps.
+        n_boot: Replicates.
+        level: Coverage, e.g. 0.95.
+        expected_block: Mean block length; defaults to n**(1/3), the usual
+            rule of thumb -- long enough to span local dependence, short
+            enough to stay small relative to the sample.
+        seed: For reproducibility.
+        statistic: Override the per-replicate statistic. Receives an
+            (n, 2) array of (lagged, current) pairs. Used by tests to
+            bootstrap b instead of the half-life.
+
+    Returns:
+        Interval, with ``n_valid`` recording how many replicates yielded a
+        finite half-life. If fewer than half did, the series sits near a
+        boundary and the interval is returned undefined rather than
+        manufactured from the survivors.
+    """
+    values = np.asarray(x, dtype=float).ravel()
+    values = values[np.isfinite(values)]
+    n = values.size
+    if n < 20:
+        raise ValueError(f"need at least 20 observations to bootstrap, got {n}")
+
+    if expected_block is None:
+        expected_block = max(2.0, float(n ** (1.0 / 3.0)))
+
+    # Resample blocks of consecutive PAIRS, not of raw values.
+    #
+    # Resampling the raw series and refitting attenuates b badly. Every seam
+    # between two blocks splices a value onto an unrelated predecessor, and
+    # that pair carries no autocorrelation. With blocks averaging n**(1/3)
+    # about one transition in thirteen is such a seam, and those spurious
+    # uncorrelated pairs pull b down. Measured on simulated paths of known
+    # half-life 3.0, the raw-series version returned intervals centred near
+    # 2.25 with 0% coverage -- a systematic bias, not noise.
+    #
+    # Forming the (lagged, current) pairs first and resampling blocks of those
+    # keeps every pair genuine: seams now fall BETWEEN pairs rather than
+    # through them. Blocking still preserves the serial dependence between
+    # nearby pairs, which is what makes the standard errors valid.
+    pairs = np.column_stack([values[:-1], values[1:]])
+    n_pairs = pairs.shape[0]
+
+    def _fit_pairs(sample: np.ndarray) -> float:
+        lag, cur = sample[:, 0], sample[:, 1]
+        design = np.column_stack([np.ones(lag.size), lag])
+        coef, *_ = np.linalg.lstsq(design, cur, rcond=None)
+        return half_life_from_b(float(coef[1]))
+
+    stat = statistic or _fit_pairs
+    rng = np.random.default_rng(seed)
+
+    estimates = np.empty(n_boot, dtype=float)
+    for r in range(n_boot):
+        idx = stationary_bootstrap_indices(n_pairs, expected_block, rng)
+        try:
+            estimates[r] = stat(pairs[idx])
+        except (ValueError, np.linalg.LinAlgError):
+            estimates[r] = np.nan
+
+    valid = estimates[np.isfinite(estimates)]
+    if valid.size < 0.5 * n_boot:
+        return Interval(float("nan"), float("nan"), "bootstrap", level, int(valid.size))
+
+    alpha = (1.0 - level) / 2.0
+    lower, upper = np.quantile(valid, [alpha, 1.0 - alpha])
+    return Interval(float(lower), float(upper), "bootstrap", level, int(valid.size))
